@@ -3,7 +3,7 @@
 #include "link_layer.h"
 
 volatile int STOP = FALSE;
-int alarmTriggered = FALSE;
+int alarmSignaled = FALSE;
 int alarmCount = 0;
 int timeout = 0;
 int retransmitions = 0;
@@ -28,24 +28,24 @@ int llopen(LinkLayer connectionParameters) {
                 
                 sendSupervisionFrame(fd, A_ER, C_SET);
                 alarm(connectionParameters.timeout);
-                alarmTriggered = FALSE;
+                alarmSignaled = FALSE;
                 
-                while (alarmTriggered == FALSE && state != STOP_R) {
+                while (alarmSignaled == FALSE && state != STOP_R) {
                     if (read(fd, &byte, 1) > 0) {
                         switch (state) {
                             case START:
                                 if (byte == FLAG) state = FLAG_RCV;
                                 break;
                             case FLAG_RCV:
-                                if (byte == A_RE) state = A_RCV;
+                                if (byte == A_RE) state = ADDRESS_RCV;
                                 else if (byte != FLAG) state = START;
                                 break;
-                            case A_RCV:
-                                if (byte == C_UA) state = C_RCV;
+                            case ADDRESS_RCV:
+                                if (byte == C_UA) state = CONTROL_RCV;
                                 else if (byte == FLAG) state = FLAG_RCV;
                                 else state = START;
                                 break;
-                            case C_RCV:
+                            case CONTROL_RCV:
                                 if (byte == (A_RE ^ C_UA)) state = BCC1_OK;
                                 else if (byte == FLAG) state = FLAG_RCV;
                                 else state = START;
@@ -74,15 +74,15 @@ int llopen(LinkLayer connectionParameters) {
                             if (byte == FLAG) state = FLAG_RCV;
                             break;
                         case FLAG_RCV:
-                            if (byte == A_ER) state = A_RCV;
+                            if (byte == A_ER) state = ADDRESS_RCV;
                             else if (byte != FLAG) state = START;
                             break;
-                        case A_RCV:
-                            if (byte == C_SET) state = C_RCV;
+                        case ADDRESS_RCV:
+                            if (byte == C_SET) state = CONTROL_RCV;
                             else if (byte == FLAG) state = FLAG_RCV;
                             else state = START;
                             break;
-                        case C_RCV:
+                        case CONTROL_RCV:
                             if (byte == (A_ER ^ C_SET)) state = BCC1_OK;
                             else if (byte == FLAG) state = FLAG_RCV;
                             else state = START;
@@ -143,70 +143,74 @@ int connection(const char *serialPort) {
 }
 
 void alarmHandler(int signal) {
-    alarmTriggered = TRUE;
+    alarmSignaled = TRUE;
     alarmCount++;
 }
 
-int llwrite(int fd, const unsigned char *buf, int bufSize) {
+int llwrite(int descriptor, const unsigned char *dataBuffer, int bufferSize) {
 
-    int frameSize = 6+bufSize;
-    unsigned char *frame = (unsigned char *) malloc(frameSize);
-    frame[0] = FLAG;
-    frame[1] = A_ER;
-    frame[2] = C_N(tramaTx);
-    frame[3] = frame[1] ^frame[2];
-    memcpy(frame+4,buf, bufSize);
-    unsigned char BCC2 = buf[0];
-    for (unsigned int i = 1 ; i < bufSize ; i++) BCC2 ^= buf[i];
+    int packetLength = 6 + bufferSize;
+    unsigned char *packet = (unsigned char *) malloc(packetLength);
+    packet[0] = FLAG;
+    packet[1] = A_ER;
+    packet[2] = C_CONTROL(tramaTx);
+    packet[3] = packet[1] ^ packet[2];
+    memcpy(packet + 4, dataBuffer, bufferSize);
 
-    int j = 4;
-    for (unsigned int i = 0 ; i < bufSize ; i++) {
-        if(buf[i] == FLAG || buf[i] == ESC) {
-            frame = realloc(frame,++frameSize);
-            frame[j++] = ESC;
-        }
-        frame[j++] = buf[i];
+    unsigned char bccCheck = dataBuffer[0];
+    for (unsigned int i = 1; i < bufferSize; i++) {
+        bccCheck ^= dataBuffer[i];
     }
-    frame[j++] = BCC2;
-    frame[j++] = FLAG;
 
-    int currentTransmition = 0;
-    int rejected = 0, accepted = 0;
+    int packetIdx = 4;
+    for (unsigned int i = 0; i < bufferSize; i++) {
+        if (dataBuffer[i] == FLAG || dataBuffer[i] == ESC) {
+            packet = realloc(packet, ++packetLength);
+            packet[packetIdx++] = ESC;
+        }
+        packet[packetIdx++] = dataBuffer[i];
+    }
+    packet[packetIdx++] = bccCheck;
+    packet[packetIdx++] = FLAG;
 
-    while (currentTransmition < retransmitions) { 
-        alarmTriggered = FALSE;
+    int currentAttempt = 0;
+    int hasRejections = 0, isAccepted = 0;
+
+    while (currentAttempt < retransmitions) { 
+        alarmSignaled = FALSE;
         alarm(timeout);
-        rejected = 0;
-        accepted = 0;
-        while (alarmTriggered == FALSE && !rejected && !accepted) {
+        hasRejections = 0;
+        isAccepted = 0;
+        while (alarmSignaled == FALSE && !hasRejections && !isAccepted) {
 
-            write(fd, frame, j);
-            unsigned char result = readControlFrame(fd);
+            write(descriptor, packet, packetIdx);
+            unsigned char response = readControlFrame(descriptor);
             
-            if(!result){
+            if (!response) {
                 continue;
             }
-            else if(result == C_REJ(0) || result == C_REJ(1)) {
-                rejected = 1;
+            else if (response == C_REJECTION(0) || response == C_REJECTION(1)) {
+                hasRejections = 1;
             }
-            else if(result == C_RR(0) || result == C_RR(1)) {
-                accepted = 1;
-                tramaTx = (tramaTx+1) % 2;
+            else if (response == C_ACKNOWLEDGE(0) || response == C_ACKNOWLEDGE(1)) {
+                isAccepted = 1;
+                tramaTx = (tramaTx + 1) % 2;
             }
             else continue;
 
         }
-        if (accepted) break;
-        currentTransmition++;
+        if (isAccepted) break;
+        currentAttempt++;
     }
-    
-    free(frame);
-    if(accepted) return frameSize;
-    else{
-        llclose(fd);
+
+    free(packet);
+    if (isAccepted) return packetLength;
+    else {
+        llclose(descriptor);
         return -1;
     }
 }
+
 
 int llread(int fd, unsigned char *packet) {
 
@@ -221,12 +225,12 @@ int llread(int fd, unsigned char *packet) {
                     if (byte == FLAG) state = FLAG_RCV;
                     break;
                 case FLAG_RCV:
-                    if (byte == A_ER) state = A_RCV;
+                    if (byte == A_ER) state = ADDRESS_RCV;
                     else if (byte != FLAG) state = START;
                     break;
-                case A_RCV:
-                    if (byte == C_N(0) || byte == C_N(1)){
-                        state = C_RCV;
+                case ADDRESS_RCV:
+                    if (byte == C_CONTROL(0) || byte == C_CONTROL(1)){
+                        state = CONTROL_RCV;
                         cField = byte;   
                     }
                     else if (byte == FLAG) state = FLAG_RCV;
@@ -236,7 +240,7 @@ int llread(int fd, unsigned char *packet) {
                     }
                     else state = START;
                     break;
-                case C_RCV:
+                case CONTROL_RCV:
                     if (byte == (A_ER ^ cField)) state = READING_DATA;
                     else if (byte == FLAG) state = FLAG_RCV;
                     else state = START;
@@ -254,13 +258,13 @@ int llread(int fd, unsigned char *packet) {
 
                         if (bcc2 == acc){
                             state = STOP_R;
-                            sendSupervisionFrame(fd, A_RE, C_RR(tramaRx));
+                            sendSupervisionFrame(fd, A_RE, C_ACKNOWLEDGE(tramaRx));
                             tramaRx = (tramaRx + 1)%2;
                             return i; 
                         }
                         else{
                             printf("Error: retransmition\n");
-                            sendSupervisionFrame(fd, A_RE, C_REJ(tramaRx));
+                            sendSupervisionFrame(fd, A_RE, C_REJECTION(tramaRx));
                             return -1;
                         };
 
@@ -295,24 +299,24 @@ int llclose(int fd){
                 
         sendSupervisionFrame(fd, A_ER, C_DISC);
         alarm(timeout);
-        alarmTriggered = FALSE;
+        alarmSignaled = FALSE;
                 
-        while (alarmTriggered == FALSE && state != STOP_R) {
+        while (alarmSignaled == FALSE && state != STOP_R) {
             if (read(fd, &byte, 1) > 0) {
                 switch (state) {
                     case START:
                         if (byte == FLAG) state = FLAG_RCV;
                         break;
                     case FLAG_RCV:
-                        if (byte == A_RE) state = A_RCV;
+                        if (byte == A_RE) state = ADDRESS_RCV;
                         else if (byte != FLAG) state = START;
                         break;
-                    case A_RCV:
-                        if (byte == C_DISC) state = C_RCV;
+                    case ADDRESS_RCV:
+                        if (byte == C_DISC) state = CONTROL_RCV;
                         else if (byte == FLAG) state = FLAG_RCV;
                         else state = START;
                         break;
-                    case C_RCV:
+                    case CONTROL_RCV:
                         if (byte == (A_RE ^ C_DISC)) state = BCC1_OK;
                         else if (byte == FLAG) state = FLAG_RCV;
                         else state = START;
@@ -339,25 +343,25 @@ unsigned char readControlFrame(int fd){
     unsigned char byte, cField = 0;
     LinkLayerState state = START;
     
-    while (state != STOP_R && alarmTriggered == FALSE) {  
+    while (state != STOP_R && alarmSignaled == FALSE) {  
         if (read(fd, &byte, 1) > 0 || 1) {
             switch (state) {
                 case START:
                     if (byte == FLAG) state = FLAG_RCV;
                     break;
                 case FLAG_RCV:
-                    if (byte == A_RE) state = A_RCV;
+                    if (byte == A_RE) state = ADDRESS_RCV;
                     else if (byte != FLAG) state = START;
                     break;
-                case A_RCV:
-                    if (byte == C_RR(0) || byte == C_RR(1) || byte == C_REJ(0) || byte == C_REJ(1) || byte == C_DISC){
-                        state = C_RCV;
+                case ADDRESS_RCV:
+                    if (byte == C_ACKNOWLEDGE(0) || byte == C_ACKNOWLEDGE(1) || byte == C_REJECTION(0) || byte == C_REJECTION(1) || byte == C_DISC){
+                        state = CONTROL_RCV;
                         cField = byte;   
                     }
                     else if (byte == FLAG) state = FLAG_RCV;
                     else state = START;
                     break;
-                case C_RCV:
+                case CONTROL_RCV:
                     if (byte == (A_RE ^ cField)) state = BCC1_OK;
                     else if (byte == FLAG) state = FLAG_RCV;
                     else state = START;

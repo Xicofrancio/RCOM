@@ -29,9 +29,9 @@
 #define C_SET 0x03
 #define C_DISC 0x0B
 #define C_UA 0x07
-#define C_RR(Nr) ((Nr << 7) | 0x05)
-#define C_REJ(Nr) ((Nr << 7) | 0x01)
-#define C_N(Ns) (Ns << 6)
+#define C_ACKNOWLEDGE(Nr) ((Nr << 7) | 0x05)
+#define C_REJECTION(Nr) ((Nr << 7) | 0x01)
+#define C_CONTROL(Ns) (Ns << 6)
 
 typedef enum
 {
@@ -39,18 +39,17 @@ typedef enum
    LlRx,
 } LinkLayerRole;
 
-typedef enum
-{
-   START,
-   FLAG_RCV,
-   A_RCV,
-   C_RCV,
-   BCC1_OK,
-   STOP_R,
-   DATA_FOUND_ESC,
-   READING_DATA,
-   DISCONNECTED,
-   BCC2_OK
+typedef enum {
+    START,
+    FLAG_RCV,
+    ADDRESS_RCV,
+    CONTROL_RCV,
+    BCC1_OK,
+    STOP_R,
+    DATA_FOUND_ESC,
+    READING_DATA,
+    DISCONNECTED,
+    BCC2_OK
 } LinkLayerState;
 
 typedef struct
@@ -90,3 +89,5 @@ unsigned char readControlFrame (int fd);
 int sendSupervisionFrame(int fd, unsigned char A, unsigned char C);
 
 #endif // _LINK_LAYER_H_
+
+
