@@ -147,7 +147,7 @@ void alarmHandler(int signal) {
     alarmCount++;
 }
 
-int llwrite(int descriptor, const unsigned char *dataBuffer, int bufferSize) {
+/*int llwrite(int descriptor, const unsigned char *dataBuffer, int bufferSize) {
 
     int packetLength = 6 + bufferSize;
     unsigned char *packet = (unsigned char *) malloc(packetLength);
@@ -205,6 +205,83 @@ int llwrite(int descriptor, const unsigned char *dataBuffer, int bufferSize) {
 
     free(packet);
     if (isAccepted) return packetLength;
+    else {
+        llclose(descriptor);
+        return -1;
+    }
+}
+*/
+int llwrite(int descriptor, const unsigned char *dataBuffer, int bufferSize) {
+    int packetLength = 6 + bufferSize;
+    unsigned char *packet = (unsigned char *) malloc(packetLength);
+    packet[0] = FLAG;
+    packet[1] = A_ER;
+    packet[2] = C_CONTROL(tramaTx);
+    packet[3] = packet[1] ^ packet[2];
+    memcpy(packet + 4, dataBuffer, bufferSize);
+
+    unsigned char bccCheck = dataBuffer[0];
+    for (unsigned int i = 1; i < bufferSize; i++) {
+        bccCheck ^= dataBuffer[i];
+    }
+
+    int packetIdx = 4;
+    for (unsigned int i = 0; i < bufferSize; i++) {
+        if (dataBuffer[i] == FLAG || dataBuffer[i] == ESC) {
+            packet = realloc(packet, ++packetLength);
+            packet[packetIdx++] = ESC;
+        }
+        packet[packetIdx++] = dataBuffer[i];
+    }
+    packet[packetIdx++] = bccCheck;
+    packet[packetIdx++] = FLAG;
+
+    int result = primaryTransmitter(descriptor, packet, packetIdx);
+
+    free(packet);
+    return result;
+}
+
+unsigned char secondaryReceiver(int descriptor) {
+    while (alarmSignaled == FALSE) {
+        unsigned char response = readControlFrame(descriptor);
+        
+        if (!response) {
+            continue;
+        }
+        else if (response == C_REJECTION(0) || response == C_REJECTION(1) || 
+                 response == C_ACKNOWLEDGE(0) || response == C_ACKNOWLEDGE(1)) {
+            return response;
+        }
+    }
+    return 0; // Return 0 if timeout or an invalid response.
+}
+
+int primaryTransmitter(int descriptor, unsigned char *packet, int packetIdx) {
+    int currentAttempt = 0;
+    int hasRejections = 0, isAccepted = 0;
+
+    while (currentAttempt < retransmitions) { 
+        alarmSignaled = FALSE;
+        alarm(timeout);
+        hasRejections = 0;
+        isAccepted = 0;
+        
+        write(descriptor, packet, packetIdx);
+        unsigned char response = secondaryReceiver(descriptor);
+        
+        if (response == C_REJECTION(0) || response == C_REJECTION(1)) {
+            hasRejections = 1;
+        } else if (response == C_ACKNOWLEDGE(0) || response == C_ACKNOWLEDGE(1)) {
+            isAccepted = 1;
+            tramaTx = (tramaTx + 1) % 2;
+        }
+
+        if (isAccepted) break;
+        currentAttempt++;
+    }
+
+    if (isAccepted) return packetIdx;
     else {
         llclose(descriptor);
         return -1;
