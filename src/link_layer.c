@@ -377,55 +377,8 @@ int llread(int fd, unsigned char *dataPacket) {
         }
     }
     return -1;
-}/*
-int llclose(int fd){
+}
 
-    LinkLayerState state = START;
-    unsigned char byte;
-    (void) signal(SIGALRM, alarmHandler);
-    
-    while (retransmitions != 0 && state != STOP_R) {
-                
-        sendSupervisionFrame(fd, A_ER, C_DISC);
-        alarm(timeout);
-        alarmSignaled = FALSE;
-                
-        while (alarmSignaled == FALSE && state != STOP_R) {
-            if (read(fd, &byte, 1) > 0) {
-                switch (state) {
-                    case START:
-                        if (byte == FLAG) state = FLAG_RCV;
-                        break;
-                    case FLAG_RCV:
-                        if (byte == A_RE) state = ADDRESS_RCV;
-                        else if (byte != FLAG) state = START;
-                        break;
-                    case ADDRESS_RCV:
-                        if (byte == C_DISC) state = CONTROL_RCV;
-                        else if (byte == FLAG) state = FLAG_RCV;
-                        else state = START;
-                        break;
-                    case CONTROL_RCV:
-                        if (byte == (A_RE ^ C_DISC)) state = BCC1_OK;
-                        else if (byte == FLAG) state = FLAG_RCV;
-                        else state = START;
-                        break;
-                    case BCC1_OK:
-                        if (byte == FLAG) state = STOP_R;
-                        else state = START;
-                        break;
-                    default: 
-                        break;
-                }
-            }
-        } 
-        retransmitions--;
-    }
-
-    if (state != STOP_R) return -1;
-    sendSupervisionFrame(fd, A_ER, C_UA);
-    return close(fd);
-}*/
 int llclose(int fd) {
     LinkLayerState state = START;
     unsigned char byte;
