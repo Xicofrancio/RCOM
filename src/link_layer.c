@@ -307,83 +307,77 @@ int primaryTransmitter(int descriptor, unsigned char *packet, int packetIdx) {
 }
 
 
-int llread(int fd, unsigned char *packet) {
+int llread(int fd, unsigned char *dataPacket) {
+    unsigned char currentByte, controlField;
+    int dataIndex = 0;
+    LinkLayerState currentState = START;
 
-    unsigned char byte, cField;
-    int i = 0;
-    LinkLayerState state = START;
-
-    while (state != STOP_R) {  
-        if (read(fd, &byte, 1) > 0) {
-            switch (state) {
+    while (currentState != STOP_R) {
+        if (read(fd, &currentByte, 1) > 0) {
+            switch (currentState) {
                 case START:
-                    if (byte == FLAG) state = FLAG_RCV;
+                    currentState = (currentByte == FLAG) ? FLAG_RCV : START;
                     break;
                 case FLAG_RCV:
-                    if (byte == A_ER) state = ADDRESS_RCV;
-                    else if (byte != FLAG) state = START;
+                    if (currentByte == A_ER)
+                        currentState = ADDRESS_RCV;
+                    else if (currentByte != FLAG)
+                        currentState = START;
                     break;
                 case ADDRESS_RCV:
-                    if (byte == C_CONTROL(0) || byte == C_CONTROL(1)){
-                        state = CONTROL_RCV;
-                        cField = byte;   
-                    }
-                    else if (byte == FLAG) state = FLAG_RCV;
-                    else if (byte == C_DISC) {
+                    if (currentByte == C_CONTROL(0) || currentByte == C_CONTROL(1)) {
+                        controlField = currentByte;
+                        currentState = CONTROL_RCV;
+                    } else if (currentByte == FLAG) {
+                        currentState = FLAG_RCV;
+                    } else if (currentByte == C_DISC) {
                         sendSupervisionFrame(fd, A_RE, C_DISC);
                         return 0;
+                    } else {
+                        currentState = START;
                     }
-                    else state = START;
                     break;
                 case CONTROL_RCV:
-                    if (byte == (A_ER ^ cField)) state = READING_DATA;
-                    else if (byte == FLAG) state = FLAG_RCV;
-                    else state = START;
+                    currentState = (currentByte == (A_ER ^ controlField)) ? READING_DATA :
+                                   (currentByte == FLAG) ? FLAG_RCV : START;
                     break;
                 case READING_DATA:
-                    if (byte == ESC) state = DATA_FOUND_ESC;
-                    else if (byte == FLAG){
-                        unsigned char bcc2 = packet[i-1];
-                        i--;
-                        packet[i] = '\0';
-                        unsigned char acc = packet[0];
+                    if (currentByte == ESC)
+                        currentState = DATA_FOUND_ESC;
+                    else if (currentByte == FLAG) {
+                        unsigned char bcc2 = dataPacket[dataIndex - 1];
+                        dataIndex--;
+                        dataPacket[dataIndex] = '\0';
+                        unsigned char checksum = dataPacket[0];
 
-                        for (unsigned int j = 1; j < i; j++)
-                            acc ^= packet[j];
+                        for (unsigned int j = 1; j < dataIndex; j++)
+                            checksum ^= dataPacket[j];
 
-                        if (bcc2 == acc){
-                            state = STOP_R;
+                        if (bcc2 == checksum) {
+                            currentState = STOP_R;
                             sendSupervisionFrame(fd, A_RE, C_ACKNOWLEDGE(tramaRx));
-                            tramaRx = (tramaRx + 1)%2;
-                            return i; 
-                        }
-                        else{
-                            printf("Error: retransmition\n");
+                            tramaRx = (tramaRx + 1) % 2;
+                            return dataIndex;
+                        } else {
+                            printf("Error: retransmission\n");
                             sendSupervisionFrame(fd, A_RE, C_REJECTION(tramaRx));
                             return -1;
-                        };
-
-                    }
-                    else{
-                        packet[i++] = byte;
+                        }
+                    } else {
+                        dataPacket[dataIndex++] = currentByte;
                     }
                     break;
                 case DATA_FOUND_ESC:
-                    state = READING_DATA;
-                    if (byte == ESC || byte == FLAG) packet[i++] = byte;
-                    else{
-                        packet[i++] = ESC;
-                        packet[i++] = byte;
-                    }
+                    currentState = READING_DATA;
+                    dataPacket[dataIndex++] = (currentByte == ESC || currentByte == FLAG) ? currentByte : ESC ^ currentByte;
                     break;
-                default: 
+                default:
                     break;
             }
         }
     }
     return -1;
-}
-
+}/*
 int llclose(int fd){
 
     LinkLayerState state = START;
@@ -431,51 +425,106 @@ int llclose(int fd){
     if (state != STOP_R) return -1;
     sendSupervisionFrame(fd, A_ER, C_UA);
     return close(fd);
+}*/
+int llclose(int fd) {
+    LinkLayerState state = START;
+    unsigned char byte;
+    (void) signal(SIGALRM, alarmHandler);
+
+    while (retransmitions != 0 && state != STOP_R) {
+        sendSupervisionFrame(fd, A_ER, C_DISC);
+        alarm(timeout);
+        alarmSignaled = FALSE;
+
+        while (!alarmSignaled && state != STOP_R) {
+            int bytesRead = read(fd, &byte, 1);
+            if (bytesRead > 0) {
+                processReceivedByte(&state, byte);
+            }
+        }
+        retransmitions--;
+    }
+
+    if (state != STOP_R) return -1;
+    sendSupervisionFrame(fd, A_ER, C_UA);
+    return close(fd);
 }
 
-unsigned char readControlFrame(int fd){
+void processReceivedByte(LinkLayerState* state, unsigned char byte) {
+    switch (*state) {
+        case START:
+            if (byte == FLAG) *state = FLAG_RCV;
+            break;
+        case FLAG_RCV:
+            *state = (byte == A_RE) ? ADDRESS_RCV : (byte != FLAG) ? START : FLAG_RCV;
+            break;
+        case ADDRESS_RCV:
+            if (byte == C_DISC) *state = CONTROL_RCV;
+            else if (byte == FLAG) *state = FLAG_RCV;
+            else *state = START;
+            break;
+        case CONTROL_RCV:
+            *state = (byte == (A_RE ^ C_DISC)) ? BCC1_OK :
+                     (byte == FLAG) ? FLAG_RCV : START;
+            break;
+        case BCC1_OK:
+            *state = (byte == FLAG) ? STOP_R : START;
+            break;
+        default: 
+            break;
+    }
+}
 
-    unsigned char byte, cField = 0;
-    LinkLayerState state = START;
-    
-    while (state != STOP_R && alarmSignaled == FALSE) {  
-        if (read(fd, &byte, 1) > 0 || 1) {
-            switch (state) {
+unsigned char readControlFrame(int portDescriptor) {
+    unsigned char receivedByte, controlField = 0;
+    LinkLayerState currentState = START;
+
+    while (currentState != STOP_R && !alarmSignaled) {
+        if (read(portDescriptor, &receivedByte, 1) > 0) {
+            switch (currentState) {
                 case START:
-                    if (byte == FLAG) state = FLAG_RCV;
+                    currentState = (receivedByte == FLAG) ? FLAG_RCV : START;
                     break;
                 case FLAG_RCV:
-                    if (byte == A_RE) state = ADDRESS_RCV;
-                    else if (byte != FLAG) state = START;
+                    currentState = (receivedByte == A_RE) ? ADDRESS_RCV :
+                                  (receivedByte != FLAG) ? START : FLAG_RCV;
                     break;
                 case ADDRESS_RCV:
-                    if (byte == C_ACKNOWLEDGE(0) || byte == C_ACKNOWLEDGE(1) || byte == C_REJECTION(0) || byte == C_REJECTION(1) || byte == C_DISC){
-                        state = CONTROL_RCV;
-                        cField = byte;   
+                    if (receivedByte == C_ACKNOWLEDGE(0) || receivedByte == C_ACKNOWLEDGE(1) ||
+                        receivedByte == C_REJECTION(0) || receivedByte == C_REJECTION(1) || 
+                        receivedByte == C_DISC) {
+                        currentState = CONTROL_RCV;
+                        controlField = receivedByte;
+                    } else if (receivedByte == FLAG) {
+                        currentState = FLAG_RCV;
+                    } else {
+                        currentState = START;
                     }
-                    else if (byte == FLAG) state = FLAG_RCV;
-                    else state = START;
                     break;
                 case CONTROL_RCV:
-                    if (byte == (A_RE ^ cField)) state = BCC1_OK;
-                    else if (byte == FLAG) state = FLAG_RCV;
-                    else state = START;
+                    currentState = (receivedByte == (A_RE ^ controlField)) ? BCC1_OK :
+                                  (receivedByte == FLAG) ? FLAG_RCV : START;
                     break;
                 case BCC1_OK:
-                    if (byte == FLAG){
-                        state = STOP_R;
-                    }
-                    else state = START;
+                    currentState = (receivedByte == FLAG) ? STOP_R : START;
                     break;
-                default: 
+                default:
                     break;
             }
-        } 
-    } 
-    return cField;
+        }
+    }
+    return controlField;
 }
 
-int sendSupervisionFrame(int fd, unsigned char A, unsigned char C){
-    unsigned char FRAME[5] = {FLAG, A, C, A ^ C, FLAG};
-    return write(fd, FRAME, 5);
+
+
+int sendSupervisionFrame(int portDescriptor, unsigned char addressField, unsigned char controlField) {
+    unsigned char supervisionFrame[5] = {
+        FLAG,
+        addressField,
+        controlField,
+        addressField ^ controlField,
+        FLAG
+    };
+    return write(portDescriptor, supervisionFrame, sizeof(supervisionFrame));
 }
