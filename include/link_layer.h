@@ -82,7 +82,8 @@ int llread(int fd, unsigned char *packet);
 int llclose(int fd);
 
 // retorna fd ou -1 se der erro
-int connection(const char *serialPort);
+int connection(const char* port);
+
 
 // timeout
 void alarmHandler(int signal);

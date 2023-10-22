@@ -10,6 +10,87 @@ int retransmitions = 0;
 unsigned char tramaTx = 0;
 unsigned char tramaRx = 1;
 
+int llopen(LinkLayer connectionParams) {
+    LinkLayerState currentState = START;
+    int fileDescriptor = connection(connectionParams.serialPort);
+
+    if (fileDescriptor < 0) return -1;
+
+    unsigned char receivedByte;
+    timeout = connectionParams.timeout;
+    retransmitions = connectionParams.nRetransmissions;
+
+    if (connectionParams.role == LlTx) {
+        signal(SIGALRM, alarmHandler);
+        while (connectionParams.nRetransmissions != 0 && currentState != STOP_R) {
+            sendSupervisionFrame(fileDescriptor, A_ER, C_SET);
+            alarm(connectionParams.timeout);
+            alarmSignaled = FALSE;
+
+            while (!alarmSignaled && currentState != STOP_R) {
+                if (read(fileDescriptor, &receivedByte, 1) > 0) {
+                    switch (currentState) {
+                        case START:
+                            currentState = (receivedByte == FLAG) ? FLAG_RCV : START;
+                            break;
+                        case FLAG_RCV:
+                            currentState = (receivedByte == A_RE) ? ADDRESS_RCV :
+                                           (receivedByte == FLAG) ? FLAG_RCV : START;
+                            break;
+                        case ADDRESS_RCV:
+                            currentState = (receivedByte == C_UA) ? CONTROL_RCV :
+                                           (receivedByte == FLAG) ? FLAG_RCV : START;
+                            break;
+                        case CONTROL_RCV:
+                            currentState = (receivedByte == (A_RE ^ C_UA)) ? BCC1_OK :
+                                           (receivedByte == FLAG) ? FLAG_RCV : START;
+                            break;
+                        case BCC1_OK:
+                            currentState = (receivedByte == FLAG) ? STOP_R : START;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            }
+            connectionParams.nRetransmissions--;
+        }
+        if (currentState != STOP_R) return -1;
+    } else if (connectionParams.role == LlRx) {
+        while (currentState != STOP_R) {
+            if (read(fileDescriptor, &receivedByte, 1) > 0) {
+                switch (currentState) {
+                    case START:
+                        currentState = (receivedByte == FLAG) ? FLAG_RCV : START;
+                        break;
+                    case FLAG_RCV:
+                        currentState = (receivedByte == A_ER) ? ADDRESS_RCV :
+                                       (receivedByte == FLAG) ? FLAG_RCV : START;
+                        break;
+                    case ADDRESS_RCV:
+                        currentState = (receivedByte == C_SET) ? CONTROL_RCV :
+                                       (receivedByte == FLAG) ? FLAG_RCV : START;
+                        break;
+                    case CONTROL_RCV:
+                        currentState = (receivedByte == (A_ER ^ C_SET)) ? BCC1_OK :
+                                       (receivedByte == FLAG) ? FLAG_RCV : START;
+                        break;
+                    case BCC1_OK:
+                        currentState = (receivedByte == FLAG) ? STOP_R : START;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+        sendSupervisionFrame(fileDescriptor, A_RE, C_UA);
+    } else {
+        return -1;
+    }
+
+    return fileDescriptor;
+}
+/*
 int llopen(LinkLayer connectionParameters) {
     
     LinkLayerState state = START;
@@ -105,112 +186,49 @@ int llopen(LinkLayer connectionParameters) {
     }
     return fd;
 }
-
-int connection(const char *serialPort) {
-
-    int fd = open(serialPort, O_RDWR | O_NOCTTY);
-    if (fd < 0) {
-        perror(serialPort);
-        return -1; 
+*/
+int connection(const char* port) {
+    int serialFd = open(port, O_RDWR | O_NOCTTY);
+    if (serialFd < 0) {
+        perror("Error opening serial port");
+        exit(-1); 
     }
 
-    struct termios oldtio;
-    struct termios newtio;
+    struct termios oldSettings, newSettings;
 
-    if (tcgetattr(fd, &oldtio) == -1)
-    {
-        perror("tcgetattr");
+    // Get the current serial port settings
+    if (tcgetattr(serialFd, &oldSettings) != 0) {
+        perror("Failed to get serial port attributes");
+        close(serialFd);
         exit(-1);
     }
 
-    memset(&newtio, 0, sizeof(newtio));
+    // Configure the new settings
+    bzero(&newSettings, sizeof(newSettings));
+    newSettings.c_cflag = BAUDRATE | CS8 | CLOCAL | CREAD;
+    newSettings.c_iflag = IGNPAR;
+    newSettings.c_oflag = 0;
+    newSettings.c_lflag = 0;
+    newSettings.c_cc[VTIME] = 0;   /* inter-character timer unused */
+    newSettings.c_cc[VMIN] = 0;    /* non-blocking read */
 
-    newtio.c_cflag = BAUDRATE | CS8 | CLOCAL | CREAD;
-    newtio.c_iflag = IGNPAR;
-    newtio.c_oflag = 0;
-    newtio.c_lflag = 0;
-    newtio.c_cc[VTIME] = 0;
-    newtio.c_cc[VMIN] = 0;
+    // Clear the serial port buffer
+    tcflush(serialFd, TCIOFLUSH);
 
-    tcflush(fd, TCIOFLUSH);
-
-    if (tcsetattr(fd, TCSANOW, &newtio) == -1) {
-        perror("tcsetattr");
-        return -1;
+    // Apply the new settings
+    if (tcsetattr(serialFd, TCSANOW, &newSettings) != 0) {
+        perror("Failed to set serial port attributes");
+        close(serialFd);
+        exit(-1);
     }
 
-    return fd;
+    return serialFd;
 }
-
 void alarmHandler(int signal) {
     alarmSignaled = TRUE;
     alarmCount++;
 }
 
-/*int llwrite(int descriptor, const unsigned char *dataBuffer, int bufferSize) {
-
-    int packetLength = 6 + bufferSize;
-    unsigned char *packet = (unsigned char *) malloc(packetLength);
-    packet[0] = FLAG;
-    packet[1] = A_ER;
-    packet[2] = C_CONTROL(tramaTx);
-    packet[3] = packet[1] ^ packet[2];
-    memcpy(packet + 4, dataBuffer, bufferSize);
-
-    unsigned char bccCheck = dataBuffer[0];
-    for (unsigned int i = 1; i < bufferSize; i++) {
-        bccCheck ^= dataBuffer[i];
-    }
-
-    int packetIdx = 4;
-    for (unsigned int i = 0; i < bufferSize; i++) {
-        if (dataBuffer[i] == FLAG || dataBuffer[i] == ESC) {
-            packet = realloc(packet, ++packetLength);
-            packet[packetIdx++] = ESC;
-        }
-        packet[packetIdx++] = dataBuffer[i];
-    }
-    packet[packetIdx++] = bccCheck;
-    packet[packetIdx++] = FLAG;
-
-    int currentAttempt = 0;
-    int hasRejections = 0, isAccepted = 0;
-
-    while (currentAttempt < retransmitions) { 
-        alarmSignaled = FALSE;
-        alarm(timeout);
-        hasRejections = 0;
-        isAccepted = 0;
-        while (alarmSignaled == FALSE && !hasRejections && !isAccepted) {
-
-            write(descriptor, packet, packetIdx);
-            unsigned char response = readControlFrame(descriptor);
-            
-            if (!response) {
-                continue;
-            }
-            else if (response == C_REJECTION(0) || response == C_REJECTION(1)) {
-                hasRejections = 1;
-            }
-            else if (response == C_ACKNOWLEDGE(0) || response == C_ACKNOWLEDGE(1)) {
-                isAccepted = 1;
-                tramaTx = (tramaTx + 1) % 2;
-            }
-            else continue;
-
-        }
-        if (isAccepted) break;
-        currentAttempt++;
-    }
-
-    free(packet);
-    if (isAccepted) return packetLength;
-    else {
-        llclose(descriptor);
-        return -1;
-    }
-}
-*/
 int llwrite(int descriptor, const unsigned char *dataBuffer, int bufferSize) {
     int packetLength = 6 + bufferSize;
     unsigned char *packet = (unsigned char *) malloc(packetLength);
