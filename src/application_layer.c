@@ -13,11 +13,9 @@
 #include <unistd.h>
 #include <math.h>
 
-void applicationLayer(const char *serialPort, const char *role, int baudRate,
-                      int nTries, int timeout, const char *filename)
-{
+void applicationLayer(const char *serialPort, const char *role, int baudRate, int nTries, int timeout, const char *filename) {
     LinkLayer linkLayer;
-    strcpy(linkLayer.serialPort,serialPort);
+    strcpy(linkLayer.serialPort, serialPort);
     linkLayer.role = strcmp(role, "tx") ? LlRx : LlTx;
     linkLayer.baudRate = baudRate;
     linkLayer.nRetransmissions = nTries;
@@ -29,11 +27,20 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         exit(-1);
     }
 
-    switch (linkLayer.role) {
+    if (linkLayer.role == LlTx) {
+        transmitData(fd, filename);
+    } else if (linkLayer.role == LlRx) {
+        receiveData(fd);
+    } else {
+        fprintf(stderr, "Invalid role\n");
+        exit(-1);
+    }
 
-        case LlTx: {
-            
-            FILE* file = fopen(filename, "rb");
+    llclose(fd);
+}
+
+void transmitData(int fd, const char *filename) {
+     FILE* file = fopen(filename, "rb");
             if (file == NULL) {
                 perror("File not found\n");
                 exit(-1);
@@ -79,38 +86,30 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
                 exit(-1);
             }
             llclose(fd);
-            break;
-        }
-
-        case LlRx: {
-
-            unsigned char *packet = (unsigned char *)malloc(MAX_PAYLOAD_SIZE);
-            int packetSize = -1;
-            while ((packetSize = llread(fd, packet)) < 0);
-            unsigned long int rxFileSize = 0;
-            unsigned char* name = parseControlPacket(packet, packetSize, &rxFileSize); 
-
-            FILE* newFile = fopen((char *) name, "wb+");
-            while (1) {    
-                while ((packetSize = llread(fd, packet)) < 0);
-                if(packetSize == 0) break;
-                else if(packet[0] != 3){
-                    unsigned char *buffer = (unsigned char*)malloc(packetSize);
-                    parseDataPacket(packet, packetSize, buffer);
-                    fwrite(buffer, sizeof(unsigned char), packetSize-4, newFile);
-                    free(buffer);
-                }
-                else continue;
-            }
-
-            fclose(newFile);
-            break;
-
-        default:
-            exit(-1);
-            break;
-    }}
 }
+
+void receiveData(int fd) {
+     unsigned char *packet = (unsigned char *)malloc(MAX_PAYLOAD_SIZE);
+    int packetSize = -1;
+    while ((packetSize = llread(fd, packet)) < 0);
+    unsigned long int rxFileSize = 0;
+    unsigned char* name = parseControlPacket(packet, packetSize, &rxFileSize); 
+
+    FILE* newFile = fopen((char *) name, "wb+");
+    while (1) {    
+        while ((packetSize = llread(fd, packet)) < 0);
+        if (packetSize == 0) break;
+        else if (packet[0] != 3) {
+            unsigned char *buffer = (unsigned char*)malloc(packetSize);
+            parseDataPacket(packet, packetSize, buffer);
+            fwrite(buffer, sizeof(unsigned char), packetSize-4, newFile);
+            free(buffer);
+        }
+    }
+
+    fclose(newFile);
+    }
+
 
 unsigned char* parseControlPacket(unsigned char* packet, int size, unsigned long int *fileSize) {
 

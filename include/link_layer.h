@@ -52,14 +52,15 @@ typedef enum {
     BCC2_OK
 } LinkLayerState;
 
-typedef struct
-{
+typedef struct LinkLayer LinkLayer;
+
+struct LinkLayer {
     char serialPort[50];
     LinkLayerRole role;
     int baudRate;
     int nRetransmissions;
     int timeout;
-} LinkLayer;
+};
 
 // Open a connection using the "port" parameters defined in struct linkLayer.
 // Return "1" on success or "-1" on error.
